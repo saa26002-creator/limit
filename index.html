@@ -1,159 +1,344 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import * as fs from 'fs';
-import dotenv from 'dotenv';
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>賞味期限レスキュー AI</title>
+  <style>
+    :root {
+      --primary: #2e7d32;
+      --bg: #f4f6f8;
+      --card-bg: #ffffff;
+      --danger: #d32f2f;
+      --warning: #ed6c02;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: #333;
+      margin: 0;
+      padding: 16px;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.4rem;
+      color: var(--primary);
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--card-bg);
+      padding: 16px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      margin-bottom: 16px;
+    }
+    label {
+      font-weight: bold;
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.9rem;
+    }
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-sizing: border-box;
+      margin-bottom: 12px;
+    }
+    input[type="file"] {
+      display: none;
+    }
+    .file-btn {
+      display: block;
+      text-align: center;
+      background: #e8f5e9;
+      color: var(--primary);
+      border: 2px dashed var(--primary);
+      padding: 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button.submit-btn {
+      width: 100%;
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+    button.submit-btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    #preview {
+      max-width: 100%;
+      border-radius: 8px;
+      margin-top: 12px;
+      display: none;
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: bold;
+      color: white;
+    }
+    .tag-超優先 { background-color: var(--danger); }
+    .tag-優先 { background-color: var(--warning); }
+    .tag-注意 { background-color: #0288d1; }
+    .tag-通常 { background-color: #757575; }
+    
+    .item-list, .recipe-card {
+      border-bottom: 1px solid #eee;
+      padding: 8px 0;
+    }
+    .item-list:last-child { border-bottom: none; }
+    .loading {
+      text-align: center;
+      display: none;
+      padding: 20px;
+      font-weight: bold;
+      color: var(--primary);
+    }
+  </style>
 
-dotenv.config();
+  <!-- Google Gen AI SDK -->
+  <script type="importmap">
+    {
+      "imports": {
+        "@google/genai": "https://esm.sh/@google/genai@0.1.1"
+      }
+    }
+  </script>
+</head>
+<body>
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+<div class="container">
+  <h1>🌱 賞味期限レスキュー AI</h1>
 
-/**
- * 1. Vision API: 画像（レシート/冷蔵庫）から食材データと優先度タグを抽出
- */
-export async function analyzeFridgeImage(imagePath: string, mimeType: string = 'image/jpeg') {
-  const imageBuffer = fs.readFileSync(imagePath);
-  const base64Image = imageBuffer.toString('base64');
+  <!-- 設定エリア -->
+  <div class="card">
+    <label for="apiKey">Gemini API Key</label>
+    <input type="password" id="apiKey" placeholder="AI Studioで取得したAPIキーを入力">
+    <small style="color: #666;">※APIキーはブラウザ内のみで一時保持されます。</small>
+  </div>
 
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  <!-- 画像アップロード -->
+  <div class="card">
+    <label>冷蔵庫の写真 または レシート画像</label>
+    <label for="imageInput" class="file-btn">📷 画像を選択 / 撮影</label>
+    <input type="file" id="imageInput" accept="image/*">
+    <img id="preview" alt="プレビュー">
+    <button id="analyzeBtn" class="submit-btn" disabled>解析 & レシピ提案を実行</button>
+  </div>
 
-  const systemInstruction = `
-# Role & Task
-あなたは画像認識とデータ抽出のスペシャリストです。
-入力された「冷蔵庫内の写真」または「スーパーのレシート画像」から、読み取れるすべての食材・購入品を抽出し、指定のJSONフォーマットで出力してください。
+  <!-- ローディング表示 -->
+  <div id="loading" class="loading">
+    ⏳ AIが画像を解析してレシピを生成中...
+  </div>
 
-# Processing Rules
-1. 画像種別の判定: レシート画像の場合はOCR処理、冷蔵庫内の写真の場合は物体認識を行ってください。
-2. 賞味期限/消費期限の推定: 明記されている日付を採用し、不明な場合は一般的な保存期間に基づき本日(${today})から逆算してください。
-3. 優先度タグ(priority_tag)の付与基準:
-   - 【超優先】: 残り日数 0日以下（本日中）または傷みやすい生の肉・魚類
-   - 【優先】  : 残り日数 1日（明日まで）
-   - 【注意】  : 残り日数 2日
-   - 【通常】  : 残り日数 3日以上、または日持ちする調味料・乾物類
-  `;
+  <!-- 結果表示 -->
+  <div id="result" style="display: none;">
+    <!-- 食材リスト -->
+    <div class="card">
+      <h3>📋 検出された食材</h3>
+      <div id="ingredientItems"></div>
+    </div>
 
-  // 出力構造の定義 (JSON Schema)
-  const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-      source_type: { type: Type.STRING, enum: ['receipt', 'fridge_photo'] },
-      processed_at: { type: Type.STRING },
-      items: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            item_id: { type: Type.STRING },
-            name: { type: Type.STRING },
-            quantity: { type: Type.STRING },
-            expiration_date: { type: Type.STRING },
-            days_left: { type: Type.INTEGER },
-            priority_tag: { type: Type.STRING, enum: ['【超優先】', '【優先】', '【注意】', '【通常】'] },
-            category: { type: Type.STRING },
-            notes: { type: Type.STRING }
-          },
-          required: ['item_id', 'name', 'priority_tag', 'days_left']
+    <!-- レシピ提案 -->
+    <div class="card">
+      <h3>🍳 提案レシピ</h3>
+      <div id="recipesContainer"></div>
+    </div>
+
+    <!-- 保存テクニック -->
+    <div class="card">
+      <h3>🧊 余った食材の長持ち保存法</h3>
+      <div id="preservationContainer"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { GoogleGenAI, Type } from '@google/genai';
+
+  const apiKeyInput = document.getElementById('apiKey');
+  const imageInput = document.getElementById('imageInput');
+  const preview = document.getElementById('preview');
+  const analyzeBtn = document.getElementById('analyzeBtn');
+  const loading = document.getElementById('loading');
+  const resultDiv = document.getElementById('result');
+
+  let base64Image = null;
+
+  // 画像プレビュー処理
+  imageInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      preview.src = event.target.result;
+      preview.style.display = 'block';
+      base64Image = event.target.result.split(',')[1];
+      checkReady();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  apiKeyInput.addEventListener('input', checkReady);
+
+  function checkReady() {
+    analyzeBtn.disabled = !(apiKeyInput.value.trim() && base64Image);
+  }
+
+  // メイン実行処理
+  analyzeBtn.addEventListener('click', async () => {
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey || !base64Image) return;
+
+    loading.style.display = 'block';
+    resultDiv.style.display = 'none';
+    analyzeBtn.disabled = true;
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const today = new Date().toISOString().split('T')[0];
+
+      // Vision APIプロンプトとスキーマ
+      const prompt = `
+        本日日付は ${today} です。
+        画像（冷蔵庫またはレシート）から食材を抽出し、期限切れの優先度タグ（【超優先】【優先】【注意】【通常】）を付与した上で、
+        それらを無駄なく使う使い切りレシピと、余った食材の保存・冷凍テクニックを提案してください。
+      `;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
+              { text: prompt }
+            ]
+          }
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              items: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    quantity: { type: Type.STRING },
+                    priority_tag: { type: Type.STRING, enum: ['【超優先】', '【優先】', '【注意】', '【通常】'] }
+                  },
+                  required: ['name', 'priority_tag']
+                }
+              },
+              recipes: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    cooking_time_minutes: { type: Type.INTEGER },
+                    priority_ingredients_cleared: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    steps: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    safety_and_tips: { type: Type.STRING }
+                  },
+                  required: ['title', 'steps', 'priority_ingredients_cleared']
+                }
+              },
+              preservation_guides: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    ingredient_name: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    instructions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    shelf_life: { type: Type.STRING }
+                  },
+                  required: ['ingredient_name', 'title', 'instructions', 'shelf_life']
+                }
+              }
+            },
+            required: ['items', 'recipes', 'preservation_guides']
+          }
         }
-      }
-    },
-    required: ['source_type', 'items']
-  };
+      });
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { inlineData: { mimeType, data: base64Image } },
-          { text: `本日日付は ${today} です。画像に含まれる食材を解析してください。` }
-        ]
-      }
-    ],
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema
+      const data = JSON.parse(response.text);
+      renderResults(data);
+
+    } catch (err) {
+      alert('エラーが発生しました: ' + err.message);
+      console.error(err);
+    } finally {
+      loading.style.display = 'none';
+      analyzeBtn.disabled = false;
     }
   });
 
-  return JSON.parse(response.text!);
-}
+  // 結果描画関数
+  function renderResults(data) {
+    // 1. 食材リスト
+    const itemsContainer = document.getElementById('ingredientItems');
+    itemsContainer.innerHTML = data.items.map(item => {
+      const tagClass = 'tag-' + item.priority_tag.replace(/[【】]/g, '');
+      return `
+        <div class="item-list">
+          <span class="tag ${tagClass}">${item.priority_tag}</span>
+          <strong>${item.name}</strong> (${item.quantity || '適量'})
+        </div>
+      `;
+    }).join('');
 
-/**
- * 2. Recipe API: 食材リストからレシピおよび余った食材の保存テクニックを生成
- */
-export async function generateRecipesAndPreservation(ingredientItems: any[], userConstraints: string = '') {
-  const systemInstruction = `
-# Role & Goal
-あなたは家庭の「食品ロスゼロ」と「献立決定のストレス軽減」を達成する高度な料理アドバイザーAIです。
-入力される食材の「優先度タグ」を厳密に評価し、賞味期限切れ間近の食材を使い切るレシピと、余った食材の保存テクニックを提案してください。
+    // 2. レシピ
+    const recipesContainer = document.getElementById('recipesContainer');
+    recipesContainer.innerHTML = data.recipes.map(recipe => `
+      <div class="recipe-card">
+        <h4>🍲 ${recipe.title} (${recipe.cooking_time_minutes}分)</h4>
+        <p><strong>消費できた食材:</strong> ${recipe.priority_ingredients_cleared.join(', ')}</p>
+        <ol>
+          ${recipe.steps.map(step => `<li>${step}</li>`).join('')}
+        </ol>
+        ${recipe.safety_and_tips ? `<p style="font-size:0.85rem; color:#666;">💡 ${recipe.safety_and_tips}</p>` : ''}
+      </div>
+    `).join('');
 
-# Rules
-1. 【超優先】タグの食材は原則すべて使い切るレシピにしてください。
-2. レシピで使い切れず余る【超優先】【優先】食材がある場合は、長持ち保存・冷凍テクニック(preservation_guides)を提案してください。
-3. アレルギー/NG食材は絶対に含めないでください。
-  `;
+    // 3. 保存法
+    const preservationContainer = document.getElementById('preservationContainer');
+    preservationContainer.innerHTML = data.preservation_guides.map(guide => `
+      <div class="recipe-card">
+        <h4>🧊 ${guide.ingredient_name}: ${guide.title}</h4>
+        <p style="font-size:0.85rem; color:#2e7d32; font-weight:bold;">目安期間: ${guide.shelf_life}</p>
+        <ul>
+          ${guide.instructions.map(inst => `<li>${inst}</li>`).join('')}
+        </ul>
+      </div>
+    `).join('');
 
-  const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-      recipes: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            recipe_id: { type: Type.STRING },
-            title: { type: Type.STRING },
-            cooking_time_minutes: { type: Type.INTEGER },
-            servings: { type: Type.INTEGER },
-            priority_ingredients_cleared: { type: Type.ARRAY, items: { type: Type.STRING } },
-            other_ingredients_used: { type: Type.ARRAY, items: { type: Type.STRING } },
-            seasonings: { type: Type.ARRAY, items: { type: Type.STRING } },
-            steps: { type: Type.ARRAY, items: { type: Type.STRING } },
-            safety_and_tips: { type: Type.STRING }
-          },
-          required: ['recipe_id', 'title', 'steps', 'priority_ingredients_cleared']
-        }
-      },
-      preservation_guides: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            ingredient_name: { type: Type.STRING },
-            method_type: { type: Type.STRING },
-            title: { type: Type.STRING },
-            instructions: { type: Type.ARRAY, items: { type: Type.STRING } },
-            shelf_life: { type: Type.STRING },
-            thawing_tip: { type: Type.STRING }
-          },
-          required: ['ingredient_name', 'title', 'instructions', 'shelf_life']
-        }
-      }
-    },
-    required: ['recipes', 'preservation_guides']
-  };
+    resultDiv.style.display = 'block';
+  }
+</script>
 
-  const formattedIngredients = ingredientItems
-    .map(item => `- ${item.priority_tag} ${item.name} (${item.quantity || '適量'})`)
-    .join('\n');
-
-  const userPrompt = `
-- 抽出された食材リスト:
-${formattedIngredients}
-
-- ユーザーからの条件・制限事項:
-${userConstraints}
-  `;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: userPrompt,
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema
-    }
-  });
-
-  return JSON.parse(response.text!);
-}
+</body>
+</html>
